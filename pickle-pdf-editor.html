@@ -973,10 +973,13 @@ async function ensureTextItems(p) {
     if (!it.str || !it.str.replace(/\s+/g, '')) continue;
     if (!it.transform) continue;
     var m = mulT(vm, it.transform);
+    // it.transform 은 글자 크기가 이미 반영된 행렬(1단위 = 1em)이고, it.width 는 pt 단위 진행폭
     var size = Math.hypot(m[2], m[3]) || it.height || 10;
     if (!(size > 0.5)) continue;
-    var w = it.width || 0;
-    var corners = [[0, -TXT_ASC * size], [w, -TXT_ASC * size], [w, TXT_DESC * size], [0, TXT_DESC * size]];
+    var ux = Math.hypot(m[0], m[1]) || size;
+    var wEm = (it.width || 0) / ux;
+    var wPt = wEm * ux;
+    var corners = [[0, TXT_ASC], [wEm, TXT_ASC], [wEm, -TXT_DESC], [0, -TXT_DESC]];
     var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (var k = 0; k < 4; k++) {
       var u = corners[k][0], v = corners[k][1];
@@ -990,7 +993,7 @@ async function ensureTextItems(p) {
     raw.push({
       str: it.str, bx: m[4], by: m[5],
       x0: x0, y0: y0, x1: x1, y1: y1,
-      size: size, w: w, ang: Math.atan2(m[1], m[0])
+      size: size, w: wPt, ang: Math.atan2(m[1], m[0])
     });
   }
   p.textItems = groupTextItems(raw);
