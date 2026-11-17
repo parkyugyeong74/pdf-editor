@@ -386,6 +386,7 @@ var toastTimer = null;
    2. 유틸
    ========================================================= */
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function normRad(a) { var t = Math.PI * 2; a = a % t; return a < 0 ? a + t : a; }
 function cur() { return S.pages[S.cur] || null; }
 function dispW(p) { return (p.rot % 180) ? p.baseH : p.baseW; }
 function dispH(p) { return (p.rot % 180) ? p.baseW : p.baseH; }
@@ -746,13 +747,17 @@ function rotateAnnotations(p, W, H) {
       var rx = H - (a.y + a.h), ry = a.x;
       a.x = rx; a.y = ry;
       var tw = a.w; a.w = a.h; a.h = tw;
+    } else if (a.type === 'text') {
+      // 글자 기준점은 점으로 변환하고, 글자 방향도 90° 회전
+      var ntx = H - a.y, nty = a.x;
+      a.x = ntx; a.y = nty;
+      a.rot = normRad((a.rot || 0) + Math.PI / 2);
     } else {
       var box = annRect(a);
       var rrx = H - (box.y + box.h), rry = box.x;
       var rw = box.h, rh = box.w;
-      var nbx = rrx + (rw - box.w) / 2, nby = rry + (rh - box.h) / 2;
-      a.x = nbx;
-      a.y = (a.type === 'text' && a.baseline) ? nby + a.size * 0.88 : nby;
+      a.x = rrx + (rw - box.w) / 2;
+      a.y = rry + (rh - box.h) / 2;
     }
   }
   for (var h = 0; h < p.hist.length; h++) p.hist[h] = cloneAnns(p.anns);
@@ -840,16 +845,44 @@ function drawAll(ctx, anns, pxPerPt) {
     ctx.fillStyle = a.color;
     ctx.textAlign = 'left';
     ctx.textBaseline = a.baseline ? 'alphabetic' : 'top';
-    for (var L = 0; L < m.lines.length; L++) {
-      ctx.fillText(m.lines[L], a.x, a.y + L * m.lh);
+    if (a.rot) {
+      ctx.save();
+      ctx.translate(a.x, a.y);
+      ctx.rotate(a.rot);
+      for (var L2 = 0; L2 < m.lines.length; L2++) ctx.fillText(m.lines[L2], 0, L2 * m.lh);
+      ctx.restore();
+    } else {
+      for (var L = 0; L < m.lines.length; L++) {
+        ctx.fillText(m.lines[L], a.x, a.y + L * m.lh);
+      }
     }
   }
   ctx.restore();
 }
 
+function rotBoxAng(x0, y0, x1, y1, ang, ox, oy) {
+  var c = Math.cos(ang), s = Math.sin(ang);
+  var pts = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  var mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
+  for (var i = 0; i < 4; i++) {
+    var X = ox + pts[i][0] * c - pts[i][1] * s;
+    var Y = oy + pts[i][0] * s + pts[i][1] * c;
+    if (X < mnx) mnx = X;
+    if (X > mxx) mxx = X;
+    if (Y < mny) mny = Y;
+    if (Y > mxy) mxy = Y;
+  }
+  return { x: mnx, y: mny, w: mxx - mnx, h: mxy - mny };
+}
+
 function annRect(a) {
   if (a.type === 'text') {
     var m = textMetrics(a);
+    if (a.rot) {
+      var t0 = a.baseline ? -a.size * 0.88 : 0;
+      var t1 = a.baseline ? (m.lines.length - 1) * m.lh + a.size * 0.16 : m.h;
+      return rotBoxAng(0, t0, m.w, t1, a.rot, a.x, a.y);
+    }
     if (a.baseline) {
       // 기준선(alphabetic) 정렬 텍스트: a.y 가 글자 기준선
       return {
@@ -904,45 +937,61 @@ function mulT(m1, m2) {
 var TXT_ASC = 0.88;   // 기준선 위쪽(어센트) 비율
 var TXT_DESC = 0.16;  // 기준선 아래쪽(디센트) 비율
 
-/* 같은 줄에 놓인 조각들을 이어 하나의 편집 단위로 묶는다 */
+/* 같은 줄에 놓인 조각들을 이어 하나의 편집 단위로 묶는다 (페이지 회전 반영) */
 function groupTextItems(raw) {
-  var lines = [], i, j;
-  var arr = raw.slice().sort(function (a, b) { return a.by - b.by; });
-  for (i = 0; i < arr.length; i++) {
-    var it = arr[i], ln = null;
-    for (j = lines.length - 1; j >= 0 && j >= lines.length - 8; j--) {
-      if (Math.abs(lines[j].by - it.by) <= Math.max(1.4, it.size * 0.4)) { ln = lines[j]; break; }
-    }
-    if (!ln) { ln = { by: it.by, items: [] }; lines.push(ln); }
-    ln.items.push(it);
-  }
   var groups = [];
-  for (i = 0; i < lines.length; i++) {
-    var items = lines[i].items;
-    items.sort(function (a, b) { return a.bx - b.bx; });
-    var g = null;
-    for (j = 0; j < items.length; j++) {
-      var it2 = items[j];
-      if (g) {
-        var gap = it2.bx - g.x1;
-        var near = gap <= Math.max(3, g.size * 1.15) && gap >= -Math.max(4, g.size * 1.6);
-        var sameDir = Math.abs(it2.ang - g.ang) < 0.06;
-        if (near && sameDir) {
-          var sp = (gap > g.size * 0.2 && !/\s$/.test(g.str) && !/^\s/.test(it2.str)) ? ' ' : '';
-          g.str += sp + it2.str;
-          g.x0 = Math.min(g.x0, it2.x0);
-          g.y0 = Math.min(g.y0, it2.y0);
-          g.x1 = Math.max(g.x1, it2.x1);
-          g.y1 = Math.max(g.y1, it2.y1);
-          g.size = Math.max(g.size, it2.size);
-          continue;
-        }
+  var buckets = {}, keys = [], i, j;
+  for (i = 0; i < raw.length; i++) {
+    var k = (Math.round(raw[i].ang * 200) / 200).toFixed(3);
+    if (!buckets[k]) { buckets[k] = []; keys.push(k); }
+    buckets[k].push(raw[i]);
+  }
+  for (var bi = 0; bi < keys.length; bi++) {
+    var arr = buckets[keys[bi]];
+    var ang = parseFloat(keys[bi]);
+    var ux = Math.cos(ang), uy = Math.sin(ang);
+    for (i = 0; i < arr.length; i++) {
+      var o = arr[i];
+      o._along = o.bx * ux + o.by * uy;
+      o._perp = -o.bx * uy + o.by * ux;
+      o._len = o.w;
+    }
+    arr.sort(function (a, b) { return a._perp - b._perp; });
+    var lines = [];
+    for (i = 0; i < arr.length; i++) {
+      var it = arr[i], ln = null;
+      for (j = lines.length - 1; j >= 0 && j >= lines.length - 8; j--) {
+        if (Math.abs(lines[j].perp - it._perp) <= Math.max(1.4, it.size * 0.4)) { ln = lines[j]; break; }
       }
-      g = {
-        str: it2.str, x0: it2.x0, y0: it2.y0, x1: it2.x1, y1: it2.y1,
-        bx: it2.bx, by: it2.by, size: it2.size, ang: it2.ang
-      };
-      groups.push(g);
+      if (!ln) { ln = { perp: it._perp, items: [] }; lines.push(ln); }
+      ln.items.push(it);
+    }
+    for (var li = 0; li < lines.length; li++) {
+      var items = lines[li].items;
+      items.sort(function (a, b) { return a._along - b._along; });
+      var g = null;
+      for (j = 0; j < items.length; j++) {
+        var it2 = items[j];
+        if (g) {
+          var gap = it2._along - g._end;
+          if (gap <= Math.max(3, g.size * 1.15) && gap >= -Math.max(4, g.size * 1.6)) {
+            var sp = (gap > g.size * 0.2 && !/\s$/.test(g.str) && !/^\s/.test(it2.str)) ? ' ' : '';
+            g.str += sp + it2.str;
+            g.x0 = Math.min(g.x0, it2.x0);
+            g.y0 = Math.min(g.y0, it2.y0);
+            g.x1 = Math.max(g.x1, it2.x1);
+            g.y1 = Math.max(g.y1, it2.y1);
+            g.size = Math.max(g.size, it2.size);
+            g._end = it2._along + it2._len;
+            continue;
+          }
+        }
+        g = {
+          str: it2.str, x0: it2.x0, y0: it2.y0, x1: it2.x1, y1: it2.y1,
+          bx: it2.bx, by: it2.by, size: it2.size, ang: ang, _end: it2._along + it2._len
+        };
+        groups.push(g);
+      }
     }
   }
   for (i = 0; i < groups.length; i++) {
@@ -1077,7 +1126,7 @@ function sampleBgColor(m) {
   for (var t = 0; t < top.length; t++) {
     if (Math.abs(top[t][0] - r0) > 14 || Math.abs(top[t][1] - g0) > 14 || Math.abs(top[t][2] - b0) > 14) return null;
   }
-  if (0.299 * r0 + 0.587 * g0 + 0.114 * b0 < 170) return null;  // 어두운 배경이면 흰색 유지
+  if (0.299 * r0 + 0.587 * g0 + 0.114 * b0 < 90) return null;  // 어두운 배경이면 흰색 유지
   return 'rgb(' + Math.round(r0) + ',' + Math.round(g0) + ',' + Math.round(b0) + ')';
 }
 
@@ -1143,6 +1192,7 @@ async function prepareTextEdit(quiet) {
     busy(false);
   }
   if (S.tool !== 'edit' || cur() !== p) return;
+  buildToolOptions();
   drawAnns();
   if (quiet) return;
   if (!p.textItems || !p.textItems.length) {
@@ -1881,7 +1931,8 @@ E.btnEditOk.onclick = function () {
   if (txt.trim()) {
     p.anns.push({
       type: 'text', x: g.bx, y: g.by, text: txt,
-      size: size, color: color, baseline: true
+      size: size, color: color, baseline: true,
+      rot: Math.abs(g.ang) > 0.01 ? g.ang : 0
     });
   }
   // 수정된 곳은 다시 탭할 수 없도록 목록에서 제거
