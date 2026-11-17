@@ -1103,30 +1103,32 @@ function sampleBgColor(m) {
   var c = E.baseCanvas;
   var kx = c.width / dispW(p), ky = c.height / dispH(p);
   var ctx = c.getContext('2d');
-  var rows = [m.y + 0.5, m.y + m.h - 0.5];
-  var cols = [];
-  for (var i = 0; i < 5; i++) cols.push(m.x + m.w * (0.1 + i * 0.2));
   var list = [];
   try {
-    for (var r = 0; r < rows.length; r++) {
-      for (var q = 0; q < cols.length; q++) {
-        var px = Math.round(clamp(cols[q] * kx, 0, c.width - 1));
-        var py = Math.round(clamp(rows[r] * ky, 0, c.height - 1));
+    for (var r = 0; r < 4; r++) {
+      var yy = m.y + m.h * (0.15 + r * 0.235);
+      for (var q = 0; q < 6; q++) {
+        var xx = m.x + m.w * (0.08 + q * 0.168);
+        var px = Math.round(clamp(xx * kx, 0, c.width - 1));
+        var py = Math.round(clamp(yy * ky, 0, c.height - 1));
         var d = ctx.getImageData(px, py, 1, 1).data;
-        list.push([d[0], d[1], d[2]]);
+        list.push([d[0], d[1], d[2], 0.299 * d[0] + 0.587 * d[1] + 0.114 * d[2]]);
       }
     }
   } catch (e) { return null; }
   if (!list.length) return null;
-  list.sort(function (a, b) { return (b[0] + b[1] + b[2]) - (a[0] + a[1] + a[2]); });
-  var top = list.slice(0, 3);
-  var r0 = (top[0][0] + top[1][0] + top[2][0]) / 3;
-  var g0 = (top[0][1] + top[1][1] + top[2][1]) / 3;
-  var b0 = (top[0][2] + top[1][2] + top[2][2]) / 3;
-  for (var t = 0; t < top.length; t++) {
-    if (Math.abs(top[t][0] - r0) > 14 || Math.abs(top[t][1] - g0) > 14 || Math.abs(top[t][2] - b0) > 14) return null;
+  list.sort(function (a, b) { return b[3] - a[3]; });
+  var base = list[0], near = [];
+  for (var i = 0; i < list.length; i++) {
+    if (Math.abs(list[i][0] - base[0]) <= 12 && Math.abs(list[i][1] - base[1]) <= 12 && Math.abs(list[i][2] - base[2]) <= 12) {
+      near.push(list[i]);
+    }
   }
-  if (0.299 * r0 + 0.587 * g0 + 0.114 * b0 < 90) return null;  // 어두운 배경이면 흰색 유지
+  if (near.length < 3) return null;                     // 단색 배경이 아니면 흰색 유지
+  if (base[3] < 90) return null;                        // 어두운 배경이면 흰색 유지
+  var r0 = 0, g0 = 0, b0 = 0;
+  for (i = 0; i < near.length; i++) { r0 += near[i][0]; g0 += near[i][1]; b0 += near[i][2]; }
+  r0 /= near.length; g0 /= near.length; b0 /= near.length;
   return 'rgb(' + Math.round(r0) + ',' + Math.round(g0) + ',' + Math.round(b0) + ')';
 }
 
