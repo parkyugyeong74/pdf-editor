@@ -6,7 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#ffffff">
-<meta name="description" content="PDF 합치기·회전·삭제·주석·서명 — 모든 처리는 기기 안에서만 이루어집니다.">
+<meta name="description" content="PDF 합치기·회전·삭제·글자 수정·주석·서명 — 모든 처리는 기기 안에서만 이루어집니다.">
 <title>PDF 편집기</title>
 <style>
 :root{
@@ -96,7 +96,7 @@ svg{display:block;}
 #toolOpts .hint{font-size:12.5px;color:var(--mut);white-space:nowrap;}
 #toolbar{display:flex;gap:2px;padding:6px 6px 7px;overflow-x:auto;scrollbar-width:none;}
 #toolbar::-webkit-scrollbar{display:none;}
-.tool{flex:1 1 0;min-width:52px;height:56px;border-radius:12px;display:flex;flex-direction:column;align-items:center;
+.tool{flex:1 1 0;min-width:50px;height:56px;border-radius:12px;display:flex;flex-direction:column;align-items:center;
   justify-content:center;gap:3px;color:#475467;font-size:10.5px;font-weight:600;position:relative;}
 .tool svg{width:21px;height:21px;}
 .tool.on{background:var(--pri-soft);color:#1d4ed8;}
@@ -239,6 +239,23 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;heigh
   </div>
 </div>
 
+<div class="sheet" id="editSheet">
+  <div class="sheetHead"><b>글자 수정</b><button class="x" data-close="editSheet">✕</button></div>
+  <p class="hint">원래 글자를 가리고 새 글자로 바꿉니다. 내용을 <b>비우고</b> 적용을 누르면 글자만 지워집니다.</p>
+  <textarea id="editInput" placeholder="내용을 입력하세요" enterkeyhint="done"></textarea>
+  <div class="sheetRow">
+    <div class="rangewrap">
+      <span>크기</span><input type="range" id="editSize" min="4" max="64" step="0.5" value="10">
+      <span id="editSizeVal">10</span>
+    </div>
+  </div>
+  <div class="sheetRow" id="editColors"></div>
+  <div class="sheetRow end">
+    <button class="btn ghost" data-close="editSheet">취소</button>
+    <button class="btn primary" id="btnEditOk">적용</button>
+  </div>
+</div>
+
 <div class="sheet" id="sigSheet">
   <div class="sheetHead"><b>서명 만들기</b><button class="x" data-close="sigSheet">✕</button></div>
   <p class="hint">아래 칸에 손가락으로 서명해 주세요. 한 번 만들면 여러 페이지에 붙일 수 있어요.</p>
@@ -326,6 +343,7 @@ var E = {};
  'editor','edTitle','edSub','edName','btnBack','btnUndo','btnRedo','btnDel','canvasWrap','stage',
  'baseCanvas','annCanvas','toolbar','toolOpts','toast','busy','busyText','boot','bootMsg',
  'sheetBackdrop','textSheet','textInput','textSize','textSizeVal','textColors','btnTextOk',
+ 'editSheet','editInput','editSize','editSizeVal','editColors','btnEditOk',
  'sigSheet','sigCanvas','sigClear','sigSave','resultSheet','resultTitle','resultInfo',
  'btnShare','btnDownload','btnOpenTab'].forEach(function (id) { E[id] = document.getElementById(id); });
 
@@ -347,6 +365,8 @@ var S = {
   textColor: TEXT_COLORS[0],
   hlColor: HL_COLORS[0],
   penColor: PEN_COLORS[0],
+  editColor: TEXT_COLORS[0],
+  editSize: 10,
   textSize: 16,
   penWidth: 2.4,
   hlWidth: 14,
@@ -366,6 +386,7 @@ var toastTimer = null;
    2. 유틸
    ========================================================= */
 function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function normRad(a) { var t = Math.PI * 2; a = a % t; return a < 0 ? a + t : a; }
 function cur() { return S.pages[S.cur] || null; }
 function dispW(p) { return (p.rot % 180) ? p.baseH : p.baseW; }
 function dispH(p) { return (p.rot % 180) ? p.baseW : p.baseH; }
@@ -703,6 +724,7 @@ function rotatePage(i) {
   var W = dispW(p), H = dispH(p);
   rotateAnnotations(p, W, H);
   p.rot = normAngle(p.rot + 90);
+  p.textItems = null; p.textRot = -1;
   p.v++;
   renderList();
 }
@@ -725,12 +747,13 @@ function rotateAnnotations(p, W, H) {
       var rx = H - (a.y + a.h), ry = a.x;
       a.x = rx; a.y = ry;
       var tw = a.w; a.w = a.h; a.h = tw;
+    } else if (a.type === 'text') {
+      // 글자 기준점은 점으로 변환하고, 글자 방향도 90° 회전
+      var ntx = H - a.y, nty = a.x;
+      a.x = ntx; a.y = nty;
+      a.rot = normRad((a.rot || 0) + Math.PI / 2);
     } else {
-      var box = { x: a.x, y: a.y, w: a.w || 0, h: a.h || 0 };
-      if (a.type === 'text') {
-        var trm = textMetrics(a);
-        box = { x: a.x, y: a.y, w: trm.w, h: trm.h };
-      }
+      var box = annRect(a);
       var rrx = H - (box.y + box.h), rry = box.x;
       var rw = box.h, rh = box.w;
       a.x = rrx + (rw - box.w) / 2;
@@ -821,17 +844,52 @@ function drawAll(ctx, anns, pxPerPt) {
     ctx.font = fontStr(a.size, a.weight);
     ctx.fillStyle = a.color;
     ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    for (var L = 0; L < m.lines.length; L++) {
-      ctx.fillText(m.lines[L], a.x, a.y + L * m.lh);
+    ctx.textBaseline = a.baseline ? 'alphabetic' : 'top';
+    if (a.rot) {
+      ctx.save();
+      ctx.translate(a.x, a.y);
+      ctx.rotate(a.rot);
+      for (var L2 = 0; L2 < m.lines.length; L2++) ctx.fillText(m.lines[L2], 0, L2 * m.lh);
+      ctx.restore();
+    } else {
+      for (var L = 0; L < m.lines.length; L++) {
+        ctx.fillText(m.lines[L], a.x, a.y + L * m.lh);
+      }
     }
   }
   ctx.restore();
 }
 
+function rotBoxAng(x0, y0, x1, y1, ang, ox, oy) {
+  var c = Math.cos(ang), s = Math.sin(ang);
+  var pts = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  var mnx = Infinity, mny = Infinity, mxx = -Infinity, mxy = -Infinity;
+  for (var i = 0; i < 4; i++) {
+    var X = ox + pts[i][0] * c - pts[i][1] * s;
+    var Y = oy + pts[i][0] * s + pts[i][1] * c;
+    if (X < mnx) mnx = X;
+    if (X > mxx) mxx = X;
+    if (Y < mny) mny = Y;
+    if (Y > mxy) mxy = Y;
+  }
+  return { x: mnx, y: mny, w: mxx - mnx, h: mxy - mny };
+}
+
 function annRect(a) {
   if (a.type === 'text') {
     var m = textMetrics(a);
+    if (a.rot) {
+      var t0 = a.baseline ? -a.size * 0.88 : 0;
+      var t1 = a.baseline ? (m.lines.length - 1) * m.lh + a.size * 0.16 : m.h;
+      return rotBoxAng(0, t0, m.w, t1, a.rot, a.x, a.y);
+    }
+    if (a.baseline) {
+      // 기준선(alphabetic) 정렬 텍스트: a.y 가 글자 기준선
+      return {
+        x: a.x, y: a.y - a.size * 0.88,
+        w: m.w, h: (m.lines.length - 1) * m.lh + a.size * 1.06
+      };
+    }
     return { x: a.x, y: a.y, w: m.w, h: m.h };
   }
   if (a.type === 'ink' && (a.x === undefined || a.w === undefined) && a.pts && a.pts.length) {
@@ -862,10 +920,224 @@ function cloneAnns(anns) {
 }
 
 /* =========================================================
+   6.5 기존 글자 추출 (글자 수정)
+   ========================================================= */
+/* pdf.js 행렬 곱 ( Util.transform 과 동일한 규칙 ) */
+function mulT(m1, m2) {
+  return [
+    m1[0] * m2[0] + m1[2] * m2[1],
+    m1[1] * m2[0] + m1[3] * m2[1],
+    m1[0] * m2[2] + m1[2] * m2[3],
+    m1[1] * m2[2] + m1[3] * m2[3],
+    m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
+    m1[1] * m2[4] + m1[3] * m2[5] + m1[5]
+  ];
+}
+
+var TXT_ASC = 0.88;   // 기준선 위쪽(어센트) 비율
+var TXT_DESC = 0.16;  // 기준선 아래쪽(디센트) 비율
+
+/* 같은 줄에 놓인 조각들을 이어 하나의 편집 단위로 묶는다 (페이지 회전 반영) */
+function groupTextItems(raw) {
+  var groups = [];
+  var buckets = {}, keys = [], i, j;
+  for (i = 0; i < raw.length; i++) {
+    var k = (Math.round(raw[i].ang * 200) / 200).toFixed(3);
+    if (!buckets[k]) { buckets[k] = []; keys.push(k); }
+    buckets[k].push(raw[i]);
+  }
+  for (var bi = 0; bi < keys.length; bi++) {
+    var arr = buckets[keys[bi]];
+    var ang = parseFloat(keys[bi]);
+    var ux = Math.cos(ang), uy = Math.sin(ang);
+    for (i = 0; i < arr.length; i++) {
+      var o = arr[i];
+      o._along = o.bx * ux + o.by * uy;
+      o._perp = -o.bx * uy + o.by * ux;
+      o._len = o.w;
+    }
+    arr.sort(function (a, b) { return a._perp - b._perp; });
+    var lines = [];
+    for (i = 0; i < arr.length; i++) {
+      var it = arr[i], ln = null;
+      for (j = lines.length - 1; j >= 0 && j >= lines.length - 8; j--) {
+        if (Math.abs(lines[j].perp - it._perp) <= Math.max(1.4, it.size * 0.4)) { ln = lines[j]; break; }
+      }
+      if (!ln) { ln = { perp: it._perp, items: [] }; lines.push(ln); }
+      ln.items.push(it);
+    }
+    for (var li = 0; li < lines.length; li++) {
+      var items = lines[li].items;
+      items.sort(function (a, b) { return a._along - b._along; });
+      var g = null;
+      for (j = 0; j < items.length; j++) {
+        var it2 = items[j];
+        if (g) {
+          var gap = it2._along - g._end;
+          if (gap <= Math.max(3, g.size * 1.15) && gap >= -Math.max(4, g.size * 1.6)) {
+            var sp = (gap > g.size * 0.2 && !/\s$/.test(g.str) && !/^\s/.test(it2.str)) ? ' ' : '';
+            g.str += sp + it2.str;
+            g.x0 = Math.min(g.x0, it2.x0);
+            g.y0 = Math.min(g.y0, it2.y0);
+            g.x1 = Math.max(g.x1, it2.x1);
+            g.y1 = Math.max(g.y1, it2.y1);
+            g.size = Math.max(g.size, it2.size);
+            g._end = it2._along + it2._len;
+            continue;
+          }
+        }
+        g = {
+          str: it2.str, x0: it2.x0, y0: it2.y0, x1: it2.x1, y1: it2.y1,
+          bx: it2.bx, by: it2.by, size: it2.size, ang: ang, _end: it2._along + it2._len
+        };
+        groups.push(g);
+      }
+    }
+  }
+  for (i = 0; i < groups.length; i++) {
+    var q = groups[i];
+    q.x = q.x0;
+    q.y = q.y0;
+    q.w = Math.max(1, q.x1 - q.x0);
+    q.h = Math.max(1, q.y1 - q.y0);
+  }
+  return groups;
+}
+
+/* 페이지 회전을 반영한 화면(주석) 좌표로 글자 상자 읽기 */
+async function ensureTextItems(p) {
+  if (!p) return [];
+  if (p.textItems && p.textRot === p.rot) return p.textItems;
+  var src = srcOf(p);
+  if (!src) return [];
+  var page = await src.pdfjs.getPage(p.index + 1);
+  var tc = await page.getTextContent();
+  var rot = normAngle((page.rotate || 0) + p.rot);
+  var vp = page.getViewport({ scale: 1, rotation: rot });
+  var vm = vp.transform;
+  var raw = [];
+  for (var i = 0; i < tc.items.length; i++) {
+    var it = tc.items[i];
+    if (it.type && it.type !== 'text') continue;
+    if (!it.str || !it.str.replace(/\s+/g, '')) continue;
+    if (!it.transform) continue;
+    var m = mulT(vm, it.transform);
+    // it.transform 은 글자 크기가 이미 반영된 행렬(1단위 = 1em)이고, it.width 는 pt 단위 진행폭
+    var size = Math.hypot(m[2], m[3]) || it.height || 10;
+    if (!(size > 0.5)) continue;
+    var ux = Math.hypot(m[0], m[1]) || size;
+    var wEm = (it.width || 0) / ux;
+    var wPt = wEm * ux;
+    var corners = [[0, TXT_ASC], [wEm, TXT_ASC], [wEm, -TXT_DESC], [0, -TXT_DESC]];
+    var x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (var k = 0; k < 4; k++) {
+      var u = corners[k][0], v = corners[k][1];
+      var X = m[0] * u + m[2] * v + m[4];
+      var Y = m[1] * u + m[3] * v + m[5];
+      if (X < x0) x0 = X;
+      if (X > x1) x1 = X;
+      if (Y < y0) y0 = Y;
+      if (Y > y1) y1 = Y;
+    }
+    raw.push({
+      str: it.str, bx: m[4], by: m[5],
+      x0: x0, y0: y0, x1: x1, y1: y1,
+      size: size, w: wPt, ang: Math.atan2(m[1], m[0])
+    });
+  }
+  p.textItems = groupTextItems(raw);
+  p.textRot = p.rot;
+  return p.textItems;
+}
+
+function findTextGroup(p, pt) {
+  if (!p || !p.textItems) return null;
+  var best = null, bestArea = Infinity, i, g;
+  for (i = 0; i < p.textItems.length; i++) {
+    g = p.textItems[i];
+    var t = Math.max(2, g.size * 0.25);
+    if (pt.x >= g.x - t && pt.x <= g.x + g.w + t && pt.y >= g.y - t && pt.y <= g.y + g.h + t) {
+      var area = g.w * g.h;
+      if (area < bestArea) { bestArea = area; best = g; }
+    }
+  }
+  if (best) return best;
+  // 휴대폰에서 살짝 빗나간 탭도 잡도록 가장 가까운 상자(최대 8pt)로 한 번 더
+  var nearest = null, nd = 8;
+  for (i = 0; i < p.textItems.length; i++) {
+    g = p.textItems[i];
+    var dx = Math.max(g.x - pt.x, 0, pt.x - (g.x + g.w));
+    var dy = Math.max(g.y - pt.y, 0, pt.y - (g.y + g.h));
+    var d = Math.hypot(dx, dy);
+    if (d <= nd) { nd = d; nearest = g; }
+  }
+  return nearest;
+}
+
+/* 가리기 사각형: 원래 글자 상자 + 약간의 여백, 이웃 줄 침범은 막는다 */
+function maskRectFor(p, g) {
+  var padX = Math.max(0.5, g.size * 0.08);
+  var padY = Math.max(0.35, g.size * 0.05);
+  var top = g.y0 - padY, bot = g.y1 + padY;
+  var left = g.x0 - padX, right = g.x1 + padX;
+  var items = p.textItems || [];
+  for (var i = 0; i < items.length; i++) {
+    var o = items[i];
+    if (o === g) continue;
+    if (o.x1 <= left + 0.3 || o.x0 >= right - 0.3) continue;
+    if (o.y1 <= g.y0 + 0.6) top = Math.max(top, Math.min(o.y1 + 0.4, g.y0));
+    else if (o.y0 >= g.y1 - 0.6) bot = Math.min(bot, Math.max(o.y0 - 0.4, g.y1));
+  }
+  var W = dispW(p), H = dispH(p);
+  left = clamp(left, 0, W);
+  top = clamp(top, 0, H);
+  right = clamp(right, left, W);
+  bot = clamp(bot, top, H);
+  return { x: left, y: top, w: Math.max(0, right - left), h: Math.max(0, bot - top) };
+}
+
+/* 가리기 사각형 주변의 배경색을 보수적으로 추정 (회색 띠 위에서도 자연스럽게) */
+function sampleBgColor(m) {
+  var p = cur();
+  if (!p || !E.baseCanvas || !E.baseCanvas.width) return null;
+  var c = E.baseCanvas;
+  var kx = c.width / dispW(p), ky = c.height / dispH(p);
+  var ctx = c.getContext('2d');
+  var list = [];
+  try {
+    for (var r = 0; r < 4; r++) {
+      var yy = m.y + m.h * (0.15 + r * 0.235);
+      for (var q = 0; q < 6; q++) {
+        var xx = m.x + m.w * (0.08 + q * 0.168);
+        var px = Math.round(clamp(xx * kx, 0, c.width - 1));
+        var py = Math.round(clamp(yy * ky, 0, c.height - 1));
+        var d = ctx.getImageData(px, py, 1, 1).data;
+        list.push([d[0], d[1], d[2], 0.299 * d[0] + 0.587 * d[1] + 0.114 * d[2]]);
+      }
+    }
+  } catch (e) { return null; }
+  if (!list.length) return null;
+  list.sort(function (a, b) { return b[3] - a[3]; });
+  var base = list[0], near = [];
+  for (var i = 0; i < list.length; i++) {
+    if (Math.abs(list[i][0] - base[0]) <= 12 && Math.abs(list[i][1] - base[1]) <= 12 && Math.abs(list[i][2] - base[2]) <= 12) {
+      near.push(list[i]);
+    }
+  }
+  if (near.length < 3) return null;                     // 단색 배경이 아니면 흰색 유지
+  if (base[3] < 90) return null;                        // 어두운 배경이면 흰색 유지
+  var r0 = 0, g0 = 0, b0 = 0;
+  for (i = 0; i < near.length; i++) { r0 += near[i][0]; g0 += near[i][1]; b0 += near[i][2]; }
+  r0 /= near.length; g0 /= near.length; b0 /= near.length;
+  return 'rgb(' + Math.round(r0) + ',' + Math.round(g0) + ',' + Math.round(b0) + ')';
+}
+
+/* =========================================================
    7. 편집기 화면
    ========================================================= */
 var TOOLS = [
   { id: 'select', label: '선택', svg: '<path d="M4 3l7 17 2.6-6.6L20 10.8z"/>' },
+  { id: 'edit', label: '글자수정', svg: '<path d="M3.5 6V4.2h8V6"/><path d="M7.5 4.2v9.6"/><path d="M5 13.8h5"/><path d="M12.6 20.2l6.1-6.1-2.2-2.2-6.1 6.1v2.2z"/>' },
   { id: 'text', label: '텍스트', svg: '<path d="M5 6.5V4.5h14v2"/><path d="M12 4.5v15M8.5 19.5h7"/>' },
   { id: 'white', label: '가리기', svg: '<rect x="3.5" y="6.5" width="17" height="11" rx="2.2"/><path d="M8 12h8"/>' },
   { id: 'hl', label: '형광펜', svg: '<path d="M4.5 17.5h4l9-9-4-4-9 9z"/><path d="M13.5 4.5l4 4"/><path d="M3.5 21h8"/>' },
@@ -902,6 +1174,47 @@ function setTool(id) {
   }
   buildToolOptions();
   drawAnns();
+  if (id === 'edit') prepareTextEdit();
+}
+
+/* 글자 수정 도구: 페이지 글자 상자를 준비하고 점선 힌트를 보여줌 */
+/* 수정할 글자 상자를 준비하고 점선 힌트를 보여줌 */
+async function prepareTextEdit(quiet) {
+  var p = cur();
+  if (!p) return;
+  var first = !p.textItems;
+  if (first) busy(true, '글자 위치 확인 중…');
+  try {
+    await ensureTextItems(p);
+  } catch (e) {
+    console.error(e);
+    toast('이 페이지의 글자를 읽지 못했습니다');
+    return;
+  } finally {
+    busy(false);
+  }
+  if (S.tool !== 'edit' || cur() !== p) return;
+  buildToolOptions();
+  drawAnns();
+  if (quiet) return;
+  if (!p.textItems || !p.textItems.length) {
+    toast('이 페이지에는 수정할 글자가 없습니다 (스캔 이미지일 수 있어요)');
+  } else if (first) {
+    toast(p.textItems.length + '곳의 글자를 찾았습니다 — 점선 칸을 탭하세요');
+  }
+}
+
+async function tapTextAt(pt) {
+  var p = cur();
+  if (!p) return;
+  if (!p.textItems || p.textRot !== p.rot) {
+    busy(true, '글자 위치 확인 중…');
+    try { await ensureTextItems(p); } catch (e) { console.error(e); } finally { busy(false); }
+    drawAnns();
+  }
+  var g = findTextGroup(p, pt);
+  if (!g) { toast('여기에는 수정할 글자가 없어요 — 점선 칸을 탭해 주세요'); return; }
+  openEditSheet(g);
 }
 
 function swatchRow(colors, current, onPick) {
@@ -956,6 +1269,14 @@ function buildToolOptions() {
       }
     } else {
       box.appendChild(hintEl('주석을 탭해 선택 · 빈 곳을 끌면 화면 이동'));
+    }
+  } else if (t === 'edit') {
+    box.appendChild(hintEl('수정할 글자를 탭하세요 · 빈 곳을 끌면 화면 이동'));
+    if (cur() && cur().textItems) {
+      var cnt = document.createElement('span');
+      cnt.className = 'hint';
+      cnt.textContent = cur().textItems.length + '곳';
+      box.appendChild(cnt);
     }
   } else if (t === 'text') {
     box.appendChild(rangeEl('크기', 8, 64, 1, S.textSize, function (v) { S.textSize = v; }));
@@ -1080,8 +1401,43 @@ function drawAnns(preview) {
   var k = c.width / dispW(p);
   ctx.setTransform(k, 0, 0, k, 0, 0);
   drawAll(ctx, p.anns, k);
+  if (S.tool === 'edit') drawTextHits(ctx, p, k);
   if (preview) drawPreview(ctx, preview, k);
   if (S.sel) drawSelection(ctx, S.sel, k);
+}
+
+/* 글자 수정 모드: 탭할 수 있는 글자 상자를 점선으로 표시 */
+function roundRectPath(ctx, x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawTextHits(ctx, p, k) {
+  var items = p.textItems;
+  if (!items || !items.length) return;
+  ctx.save();
+  ctx.lineWidth = 1.2 / k;
+  ctx.setLineDash([3.5 / k, 3 / k]);
+  ctx.fillStyle = 'rgba(37,99,235,.05)';
+  ctx.strokeStyle = 'rgba(37,99,235,.55)';
+  for (var i = 0; i < items.length; i++) {
+    var g = items[i];
+    var x = g.x - 1 / k, y = g.y - 1 / k, w = g.w + 2 / k, h = g.h + 2 / k;
+    roundRectPath(ctx, x, y, w, h, 3 / k);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawPreview(ctx, g, k) {
@@ -1198,8 +1554,10 @@ E.btnUndo.onclick = function () {
   p.anns = cloneAnns(p.hist[p.hi]);
   p.v++;
   S.sel = null;
+  p.textItems = null; p.textRot = -1;
   p.hist[p.hi] = cloneAnns(p.hist[p.hi]);
   drawAnns(); updateTop();
+  if (S.tool === 'edit') prepareTextEdit(true);
 };
 E.btnRedo.onclick = function () {
   var p = cur();
@@ -1208,7 +1566,9 @@ E.btnRedo.onclick = function () {
   p.anns = cloneAnns(p.hist[p.hi]);
   p.v++;
   S.sel = null;
+  p.textItems = null; p.textRot = -1;
   drawAnns(); updateTop();
+  if (S.tool === 'edit') prepareTextEdit(true);
 };
 E.btnDel.onclick = function () {
   var p = cur();
@@ -1217,8 +1577,10 @@ E.btnDel.onclick = function () {
   if (idx < 0) return;
   p.anns.splice(idx, 1);
   S.sel = null;
+  p.textItems = null; p.textRot = -1;
   pushHist(p);
   drawAnns(); updateTop();
+  if (S.tool === 'edit') prepareTextEdit(true);
 };
 
 function pushHist(p) {
@@ -1337,8 +1699,8 @@ function onDown(e) {
     drawAnns(); updateTop();
     return;
   }
-  if (tool === 'text' || tool === 'sig') {
-    gesture = { mode: 'tap', pt: pt, moved: false };
+  if (tool === 'text' || tool === 'sig' || tool === 'edit') {
+    gesture = { mode: 'tap', pt: pt, moved: false, x0: e.clientX, y0: e.clientY };
     return;
   }
   if (tool === 'white') {
@@ -1395,7 +1757,13 @@ function onMove(e) {
     clampView();
   } else if (g.mode === 'tap') {
     var d = Math.hypot(pt.x - g.pt.x, pt.y - g.pt.y);
-    if (d > 6 * pxPerPt()) g.moved = true;
+    if (d > 6 * pxPerPt()) {
+      g.moved = true;
+      if (S.tool === 'edit') {
+        // 글자 수정 모드에서 끌면 화면 이동
+        gesture = { mode: 'pan', x0: g.x0, y0: g.y0, tx0: S.tx, ty0: S.ty };
+      }
+    }
   }
 }
 
@@ -1446,6 +1814,7 @@ function onUp(e) {
   } else if (g.mode === 'tap' && !g.moved) {
     if (S.tool === 'text') openTextSheet(g.pt, null);
     else if (S.tool === 'sig') placeSignature(g.pt);
+    else if (S.tool === 'edit') tapTextAt(g.pt);
   }
 }
 
@@ -1508,6 +1877,74 @@ E.btnTextOk.onclick = function () {
   pushHist(p);
   drawAnns();
   setTool('select');
+};
+
+/* =========================================================
+   9.5 글자 수정 시트
+   ========================================================= */
+var editTarget = null;
+
+function renderEditColors() {
+  E.editColors.innerHTML = '';
+  TEXT_COLORS.forEach(function (c) {
+    var b = document.createElement('button');
+    b.className = 'swatch' + (c === S.editColor ? ' on' : '');
+    b.style.background = c;
+    b.onclick = function () { S.editColor = c; renderEditColors(); };
+    E.editColors.appendChild(b);
+  });
+}
+
+function openEditSheet(g) {
+  if (!g) return;
+  editTarget = g;
+  E.editInput.value = g.str;
+  var sz = Math.max(4, Math.round(clamp(g.size, 4, 64) * 2) / 2);
+  S.editSize = sz;
+  E.editSize.max = Math.max(64, Math.ceil(g.size * 2) / 2);
+  E.editSize.value = sz;
+  E.editSizeVal.textContent = sz;
+  S.editColor = TEXT_COLORS[0];
+  renderEditColors();
+  showSheet('editSheet');
+  setTimeout(function () {
+    if (document.activeElement !== E.editInput) E.editInput.focus();
+    var n = E.editInput.value.length;
+    try { E.editInput.setSelectionRange(n, n); } catch (e) {}
+  }, 140);
+}
+
+E.editSize.oninput = function () {
+  S.editSize = parseFloat(E.editSize.value);
+  E.editSizeVal.textContent = E.editSize.value;
+};
+
+E.btnEditOk.onclick = function () {
+  var p = cur();
+  if (!p || !editTarget) { hideSheet('editSheet'); return; }
+  var g = editTarget;
+  var txt = E.editInput.value.replace(/\r/g, '');
+  var size = clamp(parseFloat(E.editSize.value) || g.size, 4, 200);
+  var color = S.editColor || TEXT_COLORS[0];
+  var m = maskRectFor(p, g);
+  if (m.w > 0.4 && m.h > 0.4) {
+    p.anns.push({ type: 'white', x: m.x, y: m.y, w: m.w, h: m.h, color: sampleBgColor(m) || '#ffffff' });
+  }
+  if (txt.trim()) {
+    p.anns.push({
+      type: 'text', x: g.bx, y: g.by, text: txt,
+      size: size, color: color, baseline: true,
+      rot: Math.abs(g.ang) > 0.01 ? g.ang : 0
+    });
+  }
+  // 수정된 곳은 다시 탭할 수 없도록 목록에서 제거
+  p.textItems = (p.textItems || []).filter(function (o) { return o !== g; });
+  editTarget = null;
+  hideSheet('editSheet');
+  pushHist(p);
+  drawAnns();
+  buildToolOptions();
+  toast(txt.trim() ? '글자를 수정했습니다' : '글자를 지웠습니다', '실행취소', function () { E.btnUndo.click(); });
 };
 
 /* =========================================================
@@ -1691,6 +2128,9 @@ async function renderAnnsPng(p, W, H, scale) {
   c.width = Math.max(1, Math.round(W * scale));
   c.height = Math.max(1, Math.round(H * scale));
   var ctx = c.getContext('2d');
+  // 투명 픽셀의 RGB를 흰색으로 고정해 테두리 회색 번짐(보간 잔상)을 막는다
+  ctx.fillStyle = 'rgba(255,255,255,0.004)';
+  ctx.fillRect(0, 0, c.width, c.height);
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
   drawAll(ctx, p.anns, 1 / scale);
   var blob = await new Promise(function (res) { c.toBlob(res, 'image/png'); });
@@ -1914,6 +2354,33 @@ window.__pdfTest = {
   openTextSheet: function (pt) { openTextSheet(pt, null); },
   textInput: function (v) { E.textInput.value = v; },
   confirmText: function () { E.btnTextOk.click(); },
+  /* --- 글자 수정 검증용 훅 --- */
+  editItems: async function (i) {
+    var p = S.pages[i === undefined ? S.cur : i];
+    var g = await ensureTextItems(p);
+    return g.map(function (x) {
+      return { str: x.str, x: x.x, y: x.y, w: x.w, h: x.h, bx: x.bx, by: x.by, size: x.size };
+    });
+  },
+  editFind: function (x, y) {
+    var g = findTextGroup(cur(), { x: x, y: y });
+    return g ? { str: g.str, x: g.x, y: g.y, w: g.w, h: g.h, bx: g.bx, by: g.by, size: g.size } : null;
+  },
+  editMask: function () { return editTarget ? maskRectFor(cur(), editTarget) : null; },
+  editTap: function (x, y) { return tapTextAt({ x: x, y: y }); },
+  editSheetValue: function () {
+    return {
+      open: document.getElementById('editSheet').classList.contains('on'),
+      str: E.editInput.value, size: E.editSize.value, target: editTarget ? editTarget.str : null
+    };
+  },
+  editApply: function (txt, size, color) {
+    if (txt !== undefined) E.editInput.value = txt;
+    if (size) { E.editSize.value = size; E.editSizeVal.textContent = size; }
+    if (color) S.editColor = color;
+    E.btnEditOk.click();
+    return cur() ? cur().anns.length : -1;
+  },
   setTool: function (t) { setTool(t); },
   sigSheet: function () { openSigSheet(); },
   // 서명 시트에 가짜 서명 그리기
